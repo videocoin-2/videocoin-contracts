@@ -1,82 +1,79 @@
-pragma solidity^0.5.13;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
 
-import "openzeppelin-solidity/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
-* @title Simple escrow contract (abstract)
-* @dev It is inherited by the Stream contract.
-*/
-contract Escrow {
-  using SafeMath for uint256;
+ * @title Escrow
+ * @dev Abstract contract for handling token-based escrows.
+ */
+abstract contract Escrow {
+    address public client; // The client who initiated the stream.
+    IERC20 public paymentToken; // The ERC-20 token used for payments.
 
-  address payable public client;
+    event Deposited(address indexed depositor, uint256 amount);
+    event Refunded(address indexed client, uint256 amount);
+    event PaymentTransferred(address indexed recipient, uint256 amount);
 
-  /**
-  * @notice Constructor
-  * @param _client Client address.
-  */
-  constructor(address payable _client) public {
-    require(_client != address(0));
-    client = _client;
-  }
+    /**
+     * @notice Constructor.
+     * @param _client Address of the client that requested the escrow.
+     * @param _paymentToken Address of the ERC-20 token used for payments.
+     */
+    constructor(address _client, IERC20 _paymentToken) {
+        require(_client != address(0), "Escrow: Invalid client address");
+        require(address(_paymentToken) != address(0), "Escrow: Invalid token address");
 
-  /// @notice Deposit an amount to escrow on behalf of the client account.
-  /// @dev Anyone that calls the method funds the client account.
-  function deposit() external payable {
-    emit Deposited(msg.value);
-  }
-
-  /**
-  * @notice Cand refund the remaining funds to the client that requested the stream
-  * if allowed by manager.
-  */
-  function refund() public {
-    require(refundAllowed());
-
-    uint256 balance = address(this).balance;
-    client.transfer(balance);
-
-    emit Refunded(balance);
-  }
-
-  /**
-  * @notice Query whether refund is allowed.
-  * @dev To be implemented by derived contracts.
-  * @return True if refund is allowed; false otherwise.
-  */
-  function refundAllowed() public view returns (bool);
-
-  /**
-  * @notice Transfers funds to the given address
-  * @dev We are supressing actual transfer. Now function only emits events
-  * @param account Account to be logged on the blockchain.
-  * @param accountAmount Amount to be logged on the blockchain.
-  * @param serviceAmount Amount to be logged on the blockchain.
-  * @return True if account was funded; false otherwise.
-  */
-  function fundAccount(address payable account, uint256 accountAmount, uint256 serviceAmount) internal returns (bool) {
-    uint256 balance = address(this).balance;
-    uint256 amount = accountAmount + serviceAmount;
-
-    if(balance == 0 || balance < amount) {
-      emit OutOfFunds();
-      return false;
+        client = _client;
+        paymentToken = _paymentToken;
     }
 
-    // To avoid VID leaking to miner accounts using current protocol implementation
-    // we have to supress actual transfer. So from now this function only emits events
-    // account.transfer(amount);
+    /**
+     * @notice Deposit tokens into the escrow.
+     * @param amount Amount of tokens to deposit.
+     */
+    function deposit(uint256 amount) external {
+        require(amount > 0, "Escrow: Deposit amount must be greater than zero");
+        require(paymentToken.transferFrom(msg.sender, address(this), amount), "Escrow: Transfer failed");
 
-    emit AccountFunded(account, accountAmount);
-    emit ServiceFunded(serviceAmount);
+        emit Deposited(msg.sender, amount);
+    }
 
-    return true;
-  }
+    /**
+     * @notice Refund remaining tokens to the client.
+     */
+    function refund() external {
+        require(refundAllowed(), "Escrow: Refund not allowed");
 
-  /// @dev events
-  event Deposited(uint256 indexed weiAmount);
-  event Refunded(uint256 weiAmount);
-  event AccountFunded(address indexed account, uint256 weiAmount);
-  event ServiceFunded(uint256 weiAmount); 
-  event OutOfFunds();
+        uint256 balance = paymentToken.balanceOf(address(this));
+        require(balance > 0, "Escrow: No funds to refund");
+
+        require(paymentToken.transfer(client, balance), "Escrow: Refund transfer failed");
+
+        emit Refunded(client, balance);
+    }
+
+    /**
+     * @notice Transfer tokens to a specified recipient.
+     * @param recipient Address of the recipient.
+     * @param amount Amount of tokens to transfer.
+     */
+    function transferPayment(address recipient, uint256 amount) internal {
+        require(recipient != address(0), "Escrow: Invalid recipient address");
+        require(amount > 0, "Escrow: Transfer amount must be greater than zero");
+
+        uint256 balance = paymentToken.balanceOf(address(this));
+        require(balance >= amount, "Escrow: Insufficient funds");
+
+        require(paymentToken.transfer(recipient, amount), "Escrow: Transfer failed");
+
+        emit PaymentTransferred(recipient, amount);
+    }
+
+    /**
+     * @notice Check if a refund is allowed.
+     * @dev Must be implemented by derived contracts.
+     * @return True if refund is allowed, otherwise false.
+     */
+    function refundAllowed() public view virtual returns (bool);
 }

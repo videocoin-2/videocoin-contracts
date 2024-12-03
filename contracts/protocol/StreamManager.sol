@@ -1,333 +1,177 @@
-pragma solidity^0.5.13;
-pragma experimental ABIEncoderV2;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
 
-import "openzeppelin-solidity/contracts/ownership/Ownable.sol";
-import "openzeppelin-solidity/contracts/access/Roles.sol";
-import "./Stream.sol";
-import "./Escrow.sol";
-import "./ManagerInterface.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-
-/**
-* @title Stream manager contract
-* @dev Stream smart contract factory with extra functionality.
-* The contract has the following responsabilities:
-*  - manages the validator list
-*  - manages Stream aproval & creation
-*  - manages refund permissions
-*/
-contract StreamManager is ManagerInterface, Ownable {
-  using Roles for Roles.Role;
-
-  struct StreamRequest {
-    bool approved;
-    bool refund;
-    bool ended;
-    address client;
-    address stream;
-    uint256[] profiles;
-    uint256 streamId;
-  }
-
-  string public version;
-  Roles.Role private _validators;
-  Roles.Role private _publishers;
-  mapping (uint256 => StreamRequest) public requests;
-  mapping (uint256 => string) public profiles;
-
-  uint256 public serviceSharePercent;
-
-  constructor() public {
-    // serviceSharePercent default value is set to 20 as it was agreed.
-    // Adding service shares breaks initial protocol implementation, 
-    // supressing reward transfer to miners. Protocol philosofy needs to 
-    // be reviewed and updated after everest release.
-    serviceSharePercent = 20;
-    version = "0.0.7";
-    // owner is one of the publisher for backward compatibility.
-    addPublisher(msg.sender);
-  }
-
-  /**
-  * @notice Returns the contracts` version.
-  * @dev Streams hvae the same version with the Manager contracts that created them\.
-  * @return Version string.
-  */
-  function getVersion() public view returns (string memory) {
-    return version;
-  }
-
-  /**
-  * @notice Manager can add validators.
-  * @dev Requires: that the address was not already added and that it`s non-zero address.
-  * Modifiers: only callable by manager account.
-  * @param v Address of validator to be added.
-  */
-  function addValidator(address v) public onlyOwner {
-    _validators.add(v);
-
-    emit ValidatorAdded(v);
-  }
-
-  /**
-  * @notice Manager can remove validators.
-  * @dev Requires: that the address was previously added and that it`s non-zero address.
-  * Modifiers: only callable by manager account.
-  * @param v Address of validator to be removed.
-  */
-  function removeValidator(address v) public onlyOwner {
-    _validators.remove(v);
-
-    emit ValidatorRemoved(v);
-  }
-
-  /**
-  * @notice Query whether a certain address is a validator.
-  * @dev Also used by the stream contract onlyValidator modifier.
-  * @param v Address of validator to be queried.
-  * @return True if address is validator, false otherwise.
-  */
-  function isValidator(address v) public view returns (bool) {
-    return _validators.has(v);
-  }
-
-  /**
-  * @notice Manager can add publishers.
-  * @dev Requires: that the address was not already added and that it`s non-zero address.
-  * Modifiers: only callable by manager account.
-  * @param v Address of publisher to be added.
-  */
-  function addPublisher(address v) public onlyOwner {
-    _publishers.add(v);
-    emit PublisherAdded(v);
-  }
-
-  /**
-  * @notice Manager can remove publishers.
-  * @dev Requires: that the address was previously added and that it`s non-zero address.
-  * Modifiers: only callable by manager account.
-  * @param v Address of publisher to be removed.
-  */
-  function removePublisher(address v) public onlyOwner {
-    _publishers.remove(v);
-    emit PublisherRemoved(v);
-  }
-
-  /**
-  * @notice Query whether a certain address is a publisher.
-  * @dev Also used by the stream contract onlyValidator modifier.
-  * @param v Address of publisher to be queried.
-  * @return True if address is publisher, false otherwise.
-  */
-  function isPublisher(address v) public view returns (bool) {
-    return _publishers.has(v);
-  }
-
-
-  /**
-  * @notice Users can request new streams (contracts).
-  * @dev Requires: that the client account has not made a request with the same stream id before.
-  * Requires: that the array of profiles is non empty.
-  * @param streamId Unique ID for the stream.
-  * @param profileNames Array of profile name strings.
-  * @return stream id.
-  */
-  function requestStream(uint256 streamId, string[] memory profileNames) public returns (uint256) {
-    require(requests[streamId].client == address(0));
-    require(profileNames.length != 0);
-
-    uint256[] memory profileHashes = new uint256[](profileNames.length);
-
-    for (uint i = 0; i < profileNames.length; i++) {
-      uint256 profileHash = uint256(keccak256(abi.encodePacked(profileNames[i])));
-      profiles[profileHash] = profileNames[i];
-      profileHashes[i] = profileHash;
+contract StreamManager is Ownable {
+    struct StreamRequest {
+        bool approved;
+        bool refund;
+        bool ended;
+        address client;
+        address stream;
+        uint256[] profiles;
+        uint256 streamId;
+        string[] aiModels; // AI-specific workloads or models
+        uint256[] computeRequirements; // Compute requirements like GPU, CPU needs
     }
 
-    bool approved = false;
-    bool refund = false;
-    bool ended = false;
+    string public version;
+    IERC20 public paymentToken;
+    mapping(uint256 => StreamRequest) public requests;
+    mapping(uint256 => string) public profiles;
+    uint256 public serviceSharePercent;
 
-    requests[streamId] = StreamRequest(approved, refund, ended, msg.sender, address(0), profileHashes, streamId);
-    emit StreamRequested(msg.sender, streamId);
+    event StreamRequested(address indexed client, uint256 indexed streamId);
+    event StreamApproved(uint256 indexed streamId);
+    event StreamCreated(address indexed streamAddress, uint256 indexed streamId);
+    event RefundAllowed(uint256 indexed streamId);
+    event RefundRevoked(uint256 indexed streamId);
+    event ServiceSharePercentUpdated(uint256 indexed percent);
 
-    return streamId;
-  }
+    constructor(IERC20 _paymentToken) Ownable(msg.sender) {
+        paymentToken = _paymentToken;
+        serviceSharePercent = 20; // Default service share percent
+        version = "1.0.0";
+    }
 
-  /**
-  * @notice Publishers can review stream requests, add extra data and approve them.
-  * @dev Requires: that the request has been registered before.
-  * Modifiers: only callable by one of the publishers account.
-  * @param streamId ID of stream
-  */
-  function approveStreamCreation(uint256 streamId) public onlyPublisher {
-    StreamRequest storage request = requests[streamId];
-    require(request.client != address(0));
+    /**
+     * @notice Request a new stream with specific AI workloads.
+     * @param streamId Unique ID for the stream.
+     * @param profileNames Array of profile name strings.
+     * @param aiModels Array of AI workload descriptions.
+     * @param computeRequirements Array of compute resource requirements.
+     */
+    function requestStream(
+        uint256 streamId,
+        string[] memory profileNames,
+        string[] memory aiModels,
+        uint256[] memory computeRequirements
+    ) public returns (uint256) {
+        require(requests[streamId].client == address(0), "Stream ID already exists");
+        require(profileNames.length != 0, "Profiles required");
+        require(aiModels.length == computeRequirements.length, "Mismatch in AI models and requirements");
 
-    request.approved = true;
+        uint256[] memory profileHashes = new uint256[](profileNames.length);
 
-    emit StreamApproved(streamId);
-  }
+        for (uint256 i = 0; i < profileNames.length; i++) {
+            uint256 profileHash = uint256(keccak256(abi.encodePacked(profileNames[i])));
+            profiles[profileHash] = profileNames[i];
+            profileHashes[i] = profileHash;
+        }
 
-  /**
-  * @notice After approval the client can create the stream. Also the client needs
-  * to fund the escrow on creation.
-  * @dev Requires: that the request is approved.
-  * Requires: that the caller is the same account that registered the request.
-  * Requires: that the stream has not already been crfeated.
-  * @param streamId ID of stream which we want to create, i.e. deploy a stream smart contract.
-  * @return Address of the newly created stream contract.
-  */
-  function createStream(uint256 streamId) public payable returns (address) {
-    StreamRequest storage request = requests[streamId];
-    require(request.approved);
-    require(request.client == msg.sender);
-    require(request.stream == address(0));
+        requests[streamId] = StreamRequest({
+            approved: false,
+            refund: false,
+            ended: false,
+            client: msg.sender,
+            stream: address(0),
+            profiles: profileHashes,
+            streamId: streamId,
+            aiModels: aiModels,
+            computeRequirements: computeRequirements
+        });
 
-    Stream stream = new Stream(streamId, msg.sender, request.profiles);
-    stream.deposit.value(msg.value)();
+        emit StreamRequested(msg.sender, streamId);
 
-    request.stream = address(stream);
+        return streamId;
+    }
 
-    emit StreamCreated(request.stream, streamId);
+    /**
+     * @notice Approve a stream request.
+     * @param streamId ID of stream to approve.
+     */
+    function approveStream(uint256 streamId) public onlyOwner {
+        StreamRequest storage request = requests[streamId];
+        require(request.client != address(0), "Stream not found");
+        request.approved = true;
 
-    return request.stream;
-  }
+        emit StreamApproved(streamId);
+    }
 
-  /**
-  * @notice Registers a new input chunk id with the given stream.
-  * @dev Called by one of the publishers. Method is called as input chunk ids are created.
-  * Requires: that the a stream corresponding to this id was already created.
-  * Requires: that the array of wattages/rewards is non-empty.
-  * Requires: that the call to stream.addInputChunkId() fullfils it`s requirements.
-  * Calls addInputChunkId on the stream.
-  * Modifiers: only callable by one of the publishers account.
-  * @param streamId ID of stream to which we want to add the input chunk id.
-  * @param chunkId ID of new input chunk; must be unique for that stream.
-  * @param wattages Array of wattage rewards for transcoding this chunk.
-  */
-  function addInputChunkId(uint256 streamId, uint256 chunkId, uint256[] memory wattages) public onlyPublisher {
-    StreamRequest storage request = requests[streamId];
-    require(request.stream != address(0));
-    require(wattages.length == request.profiles.length);
+    /**
+     * @notice Create a stream after approval and deposit tokens.
+     * @param streamId ID of the stream to create.
+     * @param depositAmount Amount of tokens to deposit.
+     */
+    function createStream(uint256 streamId, uint256 depositAmount) public returns (address) {
+        StreamRequest storage request = requests[streamId];
+        require(request.approved, "Stream not approved");
+        require(request.client == msg.sender, "Only client can create");
+        require(request.stream == address(0), "Stream already created");
 
-    Stream stream = Stream(request.stream);
-    stream.addInputChunkId(chunkId, wattages);
+        require(paymentToken.transferFrom(msg.sender, address(this), depositAmount), "Token transfer failed");
 
-    emit InputChunkAdded(streamId, chunkId);
-  }
+        // Replace with your Stream contract instantiation logic
+        address stream = address(new Stream(streamId, msg.sender, request.profiles, paymentToken));
+        request.stream = stream;
 
-  /**
-  * @notice Signals that a stream has ended and no more input chunks are available
-  * @dev Can be called by manager or client(owner)
-  * Requires: that the stream was not already ended
-  * Requires: that the caller is either manager account or the account that created the stream.
-  * @param streamId ID of stream which we we want to end.
-  */
-  function endStream(uint256 streamId) public {
-    StreamRequest storage request = requests[streamId];
+        emit StreamCreated(stream, streamId);
 
-    require(!request.ended);
-    require(isOwner() || msg.sender == request.client);
+        return stream;
+    }
 
-    Stream stream = Stream(request.stream);
-    stream.endStream();
+    /**
+     * @notice Allow refund for a specific stream.
+     * @param streamId ID of stream for refund.
+     */
+    function allowRefund(uint256 streamId) public onlyOwner {
+        StreamRequest storage request = requests[streamId];
+        require(request.client != address(0), "Stream not found");
+        require(!request.refund, "Refund already allowed");
 
-    request.ended = true;
+        request.refund = true;
 
-    emit StreamEnded(streamId, msg.sender);
-  }
+        emit RefundAllowed(streamId);
+    }
 
-  /**
-  * @notice Can query whether a client can refund the coins from a stream contract.
-  * @dev Also called by stream/escrow contract.
-  * @param streamId ID of stream which we query.
-  * @return True if stream is refundable, false otherwise.
-  */
-  function refundAllowed(uint256 streamId) public view returns (bool) {
-    return requests[streamId].refund;
-  }
+    /**
+     * @notice Revoke refund permission for a stream.
+     * @param streamId ID of stream to revoke refund.
+     */
+    function revokeRefund(uint256 streamId) public onlyOwner {
+        StreamRequest storage request = requests[streamId];
+        require(request.client != address(0), "Stream not found");
+        require(request.refund, "Refund not allowed");
 
-  /**
-  * @notice Publisher can allow client refunds.
-  * @dev Requires: that there is a request with this id.
-  * Requires: that refund was not already allowed.
-  * Modifiers: only callable by one of the publishers account.
-  * @param streamId ID of stream for which the refund is allowed.
-  */
-  function allowRefund(uint256 streamId) public onlyPublisher {
-    require(requests[streamId].client != address(0));
-    require(requests[streamId].refund != true);
+        request.refund = false;
 
-    requests[streamId].refund = true;
+        emit RefundRevoked(streamId);
+    }
 
-    emit RefundAllowed(streamId);
-  }
+    /**
+     * @notice Update service share percentage.
+     * @param percent New service share percentage.
+     */
+    function setServiceSharePercent(uint256 percent) public onlyOwner {
+        require(percent <= 100, "Percent must be <= 100");
+        serviceSharePercent = percent;
 
-  /**
-  * @notice Publisher can revoke refund permission.
-  * @dev Requires: that there is a request with this id.
-  * Requires: that refund was allowed before.
-  * Modifiers: only callable by one of the publishers account.
-  * @param streamId ID of stream for which the refund is revoked.
-  */
-  function revokeRefund(uint256 streamId) public onlyPublisher {
-    require(requests[streamId].client != address(0));
-    require(requests[streamId].refund != false);
+        emit ServiceSharePercentUpdated(percent);
+    }
 
-    requests[streamId].refund = false;
+    /**
+     * @notice Query if a refund is allowed for a stream.
+     * @param streamId ID of the stream.
+     * @return True if refund is allowed, false otherwise.
+     */
+    function refundAllowed(uint256 streamId) public view returns (bool) {
+        return requests[streamId].refund;
+    }
+}
 
-    emit RefundRevoked(streamId);
-  }
+// Simplified Stream contract for illustration purposes
+contract Stream {
+    uint256 public id;
+    address public client;
+    uint256[] public profiles;
+    IERC20 public paymentToken;
 
-  /**
-  * @notice Owner can update service share percent.
-  * @param percent service share percents.
-  */
-  function setServiceSharePercent(uint256 percent) public onlyOwner {
-    require(0 <= percent && percent <= 100, "StreamManager: percent should be in [0; 100] range");
-
-    serviceSharePercent = percent;
-
-    emit ServiceSharePercentUpdated(serviceSharePercent);
-  }
-
-  /**
-  * @notice Query service share percent.
-  * @return Service share percent uint256.
-  */
-  function getServiceSharePercent() public view returns(uint256) {
-    return serviceSharePercent;
-  }
-
-  /// modifiers
-
-  /**
-  * @notice Modifier for methods only callable by publishers.
-  * @dev The stream manager holds & manages the publishers list.
-  */
-  modifier onlyPublisher() {
-    require(isPublisher(msg.sender));
-    _;
-  }
-
-  /// @dev events
-
-  event StreamRequested(address indexed client, uint256 indexed streamId);
-  event StreamApproved(uint256 indexed streamId);
-  event StreamCreated(address indexed streamAddress, uint256 indexed streamId);
-
-  event ValidatorAdded(address indexed validator);
-  event ValidatorRemoved(address indexed validator);
-
-  event PublisherAdded(address indexed publisher);
-  event PublisherRemoved(address indexed publisher);
-
-  event RefundAllowed(uint256 indexed streamId);
-  event RefundRevoked(uint256 indexed streamId);
-
-  event InputChunkAdded(uint256 indexed streamId, uint256 indexed chunkId);
-  event StreamEnded(uint256 indexed streamId, address indexed caller);
-
-  event ServiceSharePercentUpdated(uint256 indexed percent);
+    constructor(uint256 _id, address _client, uint256[] memory _profiles, IERC20 _paymentToken) {
+        id = _id;
+        client = _client;
+        profiles = _profiles;
+        paymentToken = _paymentToken;
+    }
 }

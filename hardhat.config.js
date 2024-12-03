@@ -9,13 +9,10 @@ const privateKeys = process.env.PRIVATE_KEYS ? process.env.PRIVATE_KEYS.split(",
 
 module.exports = {
   solidity: {
-    version: "0.5.13",
-    settings: {
-      optimizer: {
-        enabled: true,
-        runs: 1,
-      },
-    },
+    compilers: [
+        { version: "0.8.0" }, // For your contract files
+        { version: "0.8.20" }, // For OpenZeppelin dependencies
+      ],
   },
   networks: {
     hardhat: {},
