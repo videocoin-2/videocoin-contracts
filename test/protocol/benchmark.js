@@ -1,105 +1,109 @@
-const stream = artifacts.require('./Stream.sol');
-const streamManager = artifacts.require('./StreamManager.sol');
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
 
-const logger = require('mocha-logger');
-const BN = web3.utils.BN;
-require('chai')
-  .use(require('chai-as-promised'))
-  .should();
+describe("Stream and StreamManager", function () {
+  let Stream, StreamManager;
+  let streamManager, stream;
+  let managerAcc, client, miner, validator;
+  const wattage = ethers.BigNumber.from(10).pow(16);
+  const wattagesArr = Array(10).fill(wattage);
+  const streamId = ethers.BigNumber.from(1);
 
-const wattage = (new BN('10')).pow(new BN('16'));
-const wattagesArr = Array(10).fill(wattage);
-
-
-contract('stream', (
-  [
-    managerAcc,
-    client,
-    miner,
-    validator,
-  ]
-) => {
-  let streamId = new BN(1);
-
-  beforeEach('initialize contracts', async () => {
-    this.mManager = await streamManager.new({ from: managerAcc });
-    this.mStream = null;
+  before(async function () {
+    [managerAcc, client, miner, validator] = await ethers.getSigners();
+    StreamManager = await ethers.getContractFactory("StreamManager");
+    Stream = await ethers.getContractFactory("Stream");
   });
 
-  describe('benchmark smart contracts', () => {
-    const chunks = [new BN(1), new BN(2), new BN(3)];
-    const profiles = ['profile1', 'profile2', 'profile3'];
+  beforeEach(async function () {
+    streamManager = await StreamManager.deploy();
+    await streamManager.deployed();
+    stream = null;
+  });
+
+  describe("Benchmark Smart Contracts", function () {
+    const chunks = [ethers.BigNumber.from(1), ethers.BigNumber.from(2), ethers.BigNumber.from(3)];
+    const profiles = ["profile1", "profile2", "profile3"];
     const wattages = wattagesArr.slice(0, profiles.length);
-    const profile = web3.utils.keccak256(profiles[0]);
+    const profile = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(profiles[0]));
 
-    describe('manager deploy benchmark', () => {
-      it('', async () => {
-        const txhash = this.mManager.transactionHash;
-        const receipt = await web3.eth.getTransactionReceipt(txhash);
-
-        logger.log(`manager deployment gas: ${receipt.gasUsed}`);
+    describe("Manager Deploy Benchmark", function () {
+      it("should log gas used for deployment", async function () {
+        const txHash = streamManager.deployTransaction.hash;
+        const receipt = await ethers.provider.getTransactionReceipt(txHash);
+        console.log(`Manager deployment gas: ${receipt.gasUsed}`);
       });
-    })
+    });
 
-    describe('stream deploy benchmark - lower bound', () => {
-      it('', async () => {
-        const value = 100;
-        let totalGas = 0;
-        let gas = 0;
-
-        let res = await this.mManager.requestStream(streamId, profiles, { from: client });
-        gas = res.receipt.gasUsed;
-        logger.log(`requestStream: ${gas}`);
-        totalGas += gas;
-        
-        res = await this.mManager.approveStreamCreation(streamId, { from: managerAcc });
-        gas = res.receipt.gasUsed;
-        logger.log(`approveStreamCreation: ${gas}`);
-        totalGas += gas;
-
-        res = await this.mManager.createStream(streamId, { from: client, value });
-        gas = res.receipt.gasUsed;
-        logger.log(`createStream: ${gas}`);
-        totalGas += gas;
-
-        logger.log(`stream deployment total gas: ${totalGas}`);
-      });
-    })
-
-    describe('chunk processing benchmark - lower bound', () => {
-      it('', async () => {
+    describe("Stream Deploy Benchmark - Lower Bound", function () {
+      it("should log gas usage for stream deployment", async function () {
+        const value = ethers.utils.parseEther("0.1"); // 0.1 Ether
         let totalGas = 0;
 
-        const value = (new BN('10')).pow(new BN('19')); // 10 VID
-        const chunks = [new BN(1), new BN(2), new BN(3)];
+        // Request Stream
+        let tx = await streamManager.connect(client).requestStream(streamId, profiles);
+        let receipt = await tx.wait();
+        console.log(`requestStream: ${receipt.gasUsed}`);
+        totalGas += receipt.gasUsed;
+
+        // Approve Stream Creation
+        tx = await streamManager.connect(managerAcc).approveStreamCreation(streamId);
+        receipt = await tx.wait();
+        console.log(`approveStreamCreation: ${receipt.gasUsed}`);
+        totalGas += receipt.gasUsed;
+
+        // Create Stream
+        tx = await streamManager.connect(client).createStream(streamId, { value });
+        receipt = await tx.wait();
+        console.log(`createStream: ${receipt.gasUsed}`);
+        totalGas += receipt.gasUsed;
+
+        console.log(`Stream deployment total gas: ${totalGas}`);
+      });
+    });
+
+    describe("Chunk Processing Benchmark - Lower Bound", function () {
+      it("should log gas usage for chunk processing", async function () {
+        let totalGas = 0;
+
+        const value = ethers.utils.parseEther("10"); // 10 Ether
         const chunkId = 1, proof = 1, outChunkId = 1;
 
-        await this.mManager.addValidator(validator, { from: managerAcc });
+        // Add Validator
+        await streamManager.connect(managerAcc).addValidator(validator.address);
 
-        await this.mManager.requestStream(streamId, profiles, { from: client });
-        await this.mManager.approveStreamCreation(streamId, { from: managerAcc });
-        let res = await this.mManager.createStream(streamId, { from: client, value });
-        const streamAddr = res.receipt.logs[0].args.streamAddress;
-        this.mStream = await stream.at(streamAddr);
+        // Request Stream
+        await streamManager.connect(client).requestStream(streamId, profiles);
 
-        let gas = 0;
-        res = await this.mManager.addInputChunkId(streamId, chunks[0], wattages, { from: managerAcc });
-        gas = res.receipt.gasUsed;
-        logger.log(`addInputChunkId: ${gas}`);
+        // Approve Stream Creation
+        await streamManager.connect(managerAcc).approveStreamCreation(streamId);
+
+        // Create Stream
+        const tx = await streamManager.connect(client).createStream(streamId, { value });
+        const receipt = await tx.wait();
+        const streamAddr = receipt.events.find((e) => e.event === "StreamCreated").args.streamAddress;
+        stream = await Stream.attach(streamAddr);
+
+        // Add Input Chunk
+        let res = await streamManager.connect(managerAcc).addInputChunkId(streamId, chunks[0], wattages);
+        let gas = (await res.wait()).gasUsed;
+        console.log(`addInputChunkId: ${gas}`);
         totalGas += gas;
 
-        res = await this.mStream.submitProof(profile, chunkId, proof, outChunkId, { from: miner });
-        gas = res.receipt.gasUsed;
-        logger.log(`submitProof: ${gas}`);
+        // Submit Proof
+        res = await stream.connect(miner).submitProof(profile, chunkId, proof, outChunkId);
+        gas = (await res.wait()).gasUsed;
+        console.log(`submitProof: ${gas}`);
         totalGas += gas;
 
-        res = await this.mStream.validateProof(profile, chunkId, { from: validator });
-        gas = res.receipt.gasUsed;
-        logger.log(`validateProof: ${gas}`);
+        // Validate Proof
+        res = await stream.connect(validator).validateProof(profile, chunkId);
+        gas = (await res.wait()).gasUsed;
+        console.log(`validateProof: ${gas}`);
         totalGas += gas;
 
-        logger.log(`chunk processing total gas: ${totalGas}`);
+        console.log(`Chunk processing total gas: ${totalGas}`);
       });
-    })
+    });
   });
 });
