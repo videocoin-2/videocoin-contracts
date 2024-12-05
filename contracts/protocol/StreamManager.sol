@@ -3,6 +3,9 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./Stream.sol";
+import "./Escrow.sol";
+import "./ManagerInterface.sol";
 
 contract StreamManager is Ownable {
     struct StreamRequest {
@@ -158,20 +161,5 @@ contract StreamManager is Ownable {
      */
     function refundAllowed(uint256 streamId) public view returns (bool) {
         return requests[streamId].refund;
-    }
-}
-
-// Simplified Stream contract for illustration purposes
-contract Stream {
-    uint256 public id;
-    address public client;
-    uint256[] public profiles;
-    IERC20 public paymentToken;
-
-    constructor(uint256 _id, address _client, uint256[] memory _profiles, IERC20 _paymentToken) {
-        id = _id;
-        client = _client;
-        profiles = _profiles;
-        paymentToken = _paymentToken;
     }
 }
